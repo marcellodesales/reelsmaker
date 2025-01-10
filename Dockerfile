@@ -22,7 +22,7 @@ RUN pip install poetry
 
 RUN poetry config virtualenvs.create false
 
-RUN poetry install
+RUN poetry install --no-root
 RUN pip install "git+https://github.com/Zulko/moviepy.git"
 
 EXPOSE 8501

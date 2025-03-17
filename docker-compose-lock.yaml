@@ -1,0 +1,15 @@
+services:
+  poetry-lock:
+    image: marcellodesales/reelsmaker-builder
+    platform: linux/amd64
+    build:
+      context: .
+      target: dependencies
+      args:
+        BASE_IMAGE: python:3.11.9-slim
+
+    command: poetry lock
+    working_dir: /build
+    volumes:
+      - .:/build
+ 

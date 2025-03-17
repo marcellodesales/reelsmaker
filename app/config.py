@@ -54,7 +54,7 @@ class __Settings(BaseSettings):
 
     TOGETHER_API_KEY: str = Field(None)
 
-    SENTRY_DSN: str = Field(None)
+    #SENTRY_DSN: str = Field(None)
     
     OPENAI_MODEL_NAME: str = Field(None)
 

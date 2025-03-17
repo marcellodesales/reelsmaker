@@ -13,6 +13,15 @@ from app.utils.strings import (
     web_color_to_ass,
 )
 from loguru import logger
+from moviepy import ImageClip
+from moviepy.audio.AudioClip import CompositeAudioClip
+from moviepy.audio.io.AudioFileClip import AudioFileClip
+from moviepy import VideoFileClip
+from moviepy.video import fx
+from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip, concatenate_videoclips
+from moviepy.video.tools.subtitles import SubtitlesClip
+from moviepy.video.VideoClip import TextClip
+from pydantic import BaseModel
 from app.pexel import search_for_stock_videos
 from PIL import Image
 from PIL import Image as pil

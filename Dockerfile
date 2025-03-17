@@ -1,9 +1,7 @@
-FROM python:3.11-slim AS builder
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS dependencies
 
-WORKDIR /app
-
-ARG DOPPLER_TOKEN  # Optional, for future use if needed
-ENV DOPPLER_TOKEN=${DOPPLER_TOKEN}
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
   build-essential \
@@ -12,18 +10,28 @@ RUN apt-get update && apt-get install -y \
   software-properties-common \
   git \
   imagemagick \
+  libmagickwand-dev \
   && rm -rf /var/lib/apt/lists/*
-
-RUN cat /etc/ImageMagick-6/policy.xml | sed 's/none/read,write/g'> /etc/ImageMagick-6/policy.xml
-
-COPY . .
 
 RUN pip install poetry
 
-RUN poetry config virtualenvs.create false
+FROM dependencies AS builder
 
+RUN cat /etc/ImageMagick-6/policy.xml | sed 's/none/read,write/g'> /etc/ImageMagick-6/policy.xml
+
+WORKDIR /app
+
+COPY poetry.lock poetry.lock
+COPY pyproject.toml pyproject.toml
+
+RUN poetry config virtualenvs.create false
 RUN poetry install --no-root
-RUN pip install "git+https://github.com/Zulko/moviepy.git"
+
+RUN apt-get -y update #&& apt-get -y upgrade && 
+RUN apt-get install -y --no-install-recommends ffmpeg
+
+
+COPY . .
 
 EXPOSE 8501
 

@@ -1,22 +1,28 @@
 import os
-import uuid
 from datetime import timedelta
-from pathlib import Path
 
 import srt_equalizer
 from loguru import logger
-from moviepy.audio.io.AudioFileClip import AudioFileClip
 from pydantic import BaseModel
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.base import BaseEngine
 
 
 class SubtitleConfig(BaseModel):
     cwd: str
+    job_id: str
     max_chars: int = 15
 
 
 class SubtitleGenerator:
-    def __init__(self, cwd):
-        self.config = SubtitleConfig(cwd=cwd)
+    def __init__(self, base_class: "BaseEngine"):
+        self.base_class = base_class
+        self.config = SubtitleConfig(
+            cwd=base_class.cwd, job_id=base_class.config.job_id
+        )
 
     async def wordify(self, srt_path: str, max_chars) -> None:
         """Wordify the srt file, each line is a word
@@ -41,42 +47,25 @@ class SubtitleGenerator:
 
     async def generate_subtitles(
         self,
-        final_audio_path: str,
-        audio_clips: list[AudioFileClip],
         sentences: list[str],
-        voice: str | None = None,
+        durations: list[float],
     ) -> str:
         logger.info("Generating subtitles...")
 
-        basedir = os.path.join(self.config.cwd, "subtitles")
-        os.makedirs(basedir, exist_ok=True)
-
-        subtitles_path = Path(basedir, f"{uuid.uuid4()}.srt")
+        subtitles_path = os.path.join(self.config.cwd, f"{self.config.job_id}.srt")
 
         subtitles = await self.locally_generate_subtitles(
-            sentences=sentences, audio_clips=audio_clips
+            sentences=sentences, durations=durations
         )
         with open(subtitles_path, "w+") as file:
             file.write(subtitles)
 
-        await self.wordify(
-            srt_path=subtitles_path.as_posix(), max_chars=self.config.max_chars
-        )
-        return subtitles_path.as_posix()
+        await self.wordify(srt_path=subtitles_path, max_chars=self.config.max_chars)
+        return subtitles_path
 
     async def locally_generate_subtitles(
-        self, sentences: list[str], audio_clips: list[AudioFileClip]
+        self, sentences: list[str], durations: list[float]
     ) -> str:
-        """
-        Generates subtitles from a given audio file and returns the path to the subtitles.
-
-        Args:
-            sentences (List[str]): all the sentences said out loud in the audio clips
-            audio_clips (List[AudioFileClip]): all the individual audio clips which will make up the final audio track
-        Returns:
-            str: The generated subtitles
-        """
-
         logger.debug("using local subtitle generation...")
 
         def convert_to_srt_time_format(total_seconds):
@@ -88,10 +77,7 @@ class SubtitleGenerator:
         start_time = 0
         subtitles = []
 
-        for i, (sentence, audio_clip) in enumerate(
-            zip(sentences, audio_clips), start=1
-        ):
-            duration = audio_clip.duration
+        for i, (sentence, duration) in enumerate(zip(sentences, durations), start=1):
             end_time = start_time + duration
 
             # Format: subtitle index, start time --> end time, sentence

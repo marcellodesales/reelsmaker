@@ -1,111 +1,83 @@
 import multiprocessing
 import os
 import random
-import uuid
+from typing import TYPE_CHECKING, Literal
 from pathlib import Path
 
+from app.effects import zoom_in_effect, zoom_out_effect
+from app.utils.strings import (
+    FFMPEG_TYPE,
+    FileClip,
+    adjust_audio_to_target_dBFS,
+    get_video_size,
+    web_color_to_ass,
+)
 from loguru import logger
 from moviepy import ImageClip
 from moviepy.audio.AudioClip import CompositeAudioClip
 from moviepy.audio.io.AudioFileClip import AudioFileClip
-from moviepy.editor import VideoFileClip
+from moviepy import VideoFileClip
 from moviepy.video import fx
-from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip
-from moviepy.video.compositing.concatenate import concatenate_videoclips
+from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip, concatenate_videoclips
 from moviepy.video.tools.subtitles import SubtitlesClip
 from moviepy.video.VideoClip import TextClip
 from pydantic import BaseModel
 from app.pexel import search_for_stock_videos
+from PIL import Image
+from PIL import Image as pil
+from pkg_resources import parse_version
+from pydantic import BaseModel
+import ffmpeg
+
+
+if parse_version(pil.__version__) >= parse_version("10.0.0"):
+    Image.ANTIALIAS = Image.LANCZOS  # type: ignore
+
+if TYPE_CHECKING:
+    from app.base import BaseEngine
+
+# TODO: implement me
+positions = {
+    "center": ["center", "center"],
+    "left": ["left", "center"],
+    "right": ["right", "center"],
+    "top": ["center", "top"],
+    "bottom": ["center", "bottom"],
+}
 
 
 class VideoGeneratorConfig(BaseModel):
-    fontsize: int = 100
-    stroke_color: str = "black"
-    text_color: str = "white"
-    stroke_width: int = 5
-    font_path: str = "fonts/bold_font.ttf"
+    fontsize: int = 70
+    stroke_color: str = "#ffffff"
+    text_color: str = "#ffffff"
+    stroke_width: int | None = 5
+    font_name: str = "Luckiest Guy"
     bg_color: str | None = None
     subtitles_position: str = "center,center"
     threads: int = multiprocessing.cpu_count()
-    watermark_path: str | None = None
+
+    watermark_path_or_text: str | None = "VoidFace"
+    watermark_opacity: float = 0.5
+    watermark_type: Literal["image", "text", "none"] = "text"
+    background_music_path: str | None = None
+
+    aspect_ratio: str = "9:16"
+    """ aspect ratio of the video """
+
+    color_effect: str = "gray"
 
 
 class VideoGenerator:
     def __init__(
         self,
-        cwd: str,
-        config: VideoGeneratorConfig,
+        base_class: "BaseEngine",
     ):
-        self.config = config
-        self.cwd = cwd
+        self.job_id = base_class.config.job_id
+        self.config = base_class.config.video_gen_config
+        self.cwd = base_class.cwd
+        self.base_engine = base_class
 
-    async def combine_videos(
-        self,
-        video_paths: list[str],
-        max_duration: int,
-        max_clip_duration: int,
-        threads: int,
-    ) -> str:
-        video_id = uuid.uuid4()
-        combined_video_path = (Path(self.cwd) / f"{video_id}.mp4").as_posix()
-
-        # Required duration of each clip
-        req_dur = max_duration / len(video_paths)
-
-        logger.debug("Combining videos...")
-        logger.debug(f"Each clip will be maximum {req_dur} seconds long.")
-
-        clips = []
-        tot_dur = 0
-
-        while tot_dur < max_duration:
-            for video_path in video_paths:
-                clip = VideoFileClip(video_path).without_audio()
-                logger.debug(
-                    f"Processing clip: {video_path}, duration: {clip.duration}"
-                )
-
-                if (max_duration - tot_dur) < clip.duration:
-                    clip = clip.subclip(0, (max_duration - tot_dur))
-                elif req_dur < clip.duration:
-                    clip = clip.subclip(0, req_dur)
-                clip = clip.with_fps(30)
-
-                if round((clip.w / clip.h), 4) < 0.5625:
-                    clip = fx.crop(
-                        clip,
-                        width=clip.w,
-                        height=round(clip.w / 0.5625),
-                        x_center=clip.w / 2,
-                        y_center=clip.h / 2,
-                    )
-                else:
-                    clip = fx.crop(
-                        clip,
-                        width=round(0.5625 * clip.h),
-                        height=clip.h,
-                        x_center=clip.w / 2,
-                        y_center=clip.h / 2,
-                    )
-                clip = clip.resize((1080, 1920))
-
-                # apply grayscale effect
-                clip = fx.blackwhite(clip)
-
-                if clip.duration > max_clip_duration:
-                    clip = clip.subclip(0, max_clip_duration)
-
-                clips.append(clip)
-
-                self.close_clip(clip)
-                tot_dur += clip.duration
-                logger.debug(f"Total duration after adding clip: {tot_dur}")
-
-        final_clip = concatenate_videoclips(clips=clips, method="compose")
-        final_clip = final_clip.with_fps(30)
-        final_clip.write_videofile(combined_video_path, threads=threads)
-
-        return combined_video_path
+        self.ffmpeg_cmd = os.path.join(os.getcwd(), "bin/ffmpeg")
 
     async def get_video_url(self, search_term: str) -> str | None:
         try:
@@ -120,105 +92,216 @@ class VideoGenerator:
 
         return None
 
+    def apply_subtitle(self, clip, subtitle_path: str):
+        position = self.config.subtitles_position.split(",")[0]
+        styles = {
+            "bottom": "Alignment=2",
+            "center": "Alignment=10",
+            "top": "Alignment=6",
+        }
+
+        text_color = web_color_to_ass(self.config.text_color)
+        stroke_color = web_color_to_ass(self.config.stroke_color)
+        font_size = round(self.config.fontsize / 5)
+
+        style = (
+            f"FontName={self.config.font_name},FontSize={font_size},"
+            f"PrimaryColour={text_color},OutlineColour={stroke_color},Outline={self.config.stroke_width},Bold=1,"
+            f"{styles.get(position, 'Alignment=10')}"
+        )
+
+        fonts_dir = "./narrator/sys/fonts"
+        return clip.filter(
+            "subtitles", filename=subtitle_path, fontsdir=fonts_dir, force_style=style
+        )
+
+    def add_audio_mix(self, video_stream, background_music_filter, tts_audio_filter):
+        audio_mix = ffmpeg.filter(
+            stream_spec=[background_music_filter, tts_audio_filter],
+            filter_name="amix",
+            duration="longest",
+            dropout_transition=0,
+        )
+        return ffmpeg.concat(video_stream, audio_mix, v=1, a=1)
+
+    def concatenate_clips(self, inputs: list[FileClip], effects: list = []):
+        processed_clips = []
+        for data in inputs:
+            clip = data.ffmpeg_clip
+
+            if len(effects) > 0:
+                effect = random.choice(effects)
+                clip = effect(clip)
+            clip = clip.filter("scale", 1080, 1920)
+
+            # apply gray effect for motivational video
+            if (
+                self.config.color_effect == "gray"
+                and self.base_engine.config.video_type == "motivational"
+            ):
+                clip = clip.filter("format", "gray")
+
+            processed_clips.append(clip)
+        final_video = ffmpeg.concat(*processed_clips, v=1, a=0)
+        return final_video
+
     async def generate_video(
         self,
-        combined_video_path: str,
-        tts_path: str,
+        clips: list[FileClip],  # the list of clips from ffmpeg
+        speech_filter: FFMPEG_TYPE,
         subtitles_path: str,
+        video_duration: float,
     ) -> str:
-        def generator(txt) -> TextClip:
-            textclip_kwargs = {
-                "font_size": self.config.fontsize,
-                "color": self.config.text_color,
-                "stroke_color": self.config.stroke_color,
-                "stroke_width": self.config.stroke_width,
-                "bg_color": self.config.bg_color,
-            }
+        logger.info("Generating video...")
+        effects = [zoom_out_effect, zoom_in_effect]
 
-            # remove keys with "none"
-            for k, v in textclip_kwargs.items():
-                if not v:
-                    del textclip_kwargs[k]
+        # Define output path
+        output_path = (Path(self.cwd) / f"{self.job_id}_final.mp4").as_posix()
 
-            textclip = TextClip(
-                text=txt,
-                font="fonts/bold_font.ttf",
-                method="label",
-                **textclip_kwargs,
-            )
-
-            return textclip
-
-        horizontal_subtitles_position, vertical_subtitles_position = (
-            self.config.subtitles_position.split(",")
+        # music must end at the end of the speech, add extra 3 seconds to make it look good
+        music_input = ffmpeg.input(
+            adjust_audio_to_target_dBFS(self.config.background_music_path),
+            t=video_duration,
         )
 
-        subtitles = SubtitlesClip(
-            subtitles=subtitles_path, make_textclip=generator, encoding="utf-8"
+        if self.base_engine.config.video_type == "motivational":
+            effects = []
+
+        video_stream = self.concatenate_clips(clips, effects)
+        video_stream = self.apply_watermark(video_stream)
+        video_stream = self.apply_subtitle(video_stream, subtitles_path)
+        video_stream = self.add_audio_mix(
+            video_stream=video_stream,
+            tts_audio_filter=speech_filter,
+            background_music_filter=music_input,
         )
 
-        subtitles_clip = subtitles.with_position(
-            (horizontal_subtitles_position, vertical_subtitles_position)
+        output = ffmpeg.output(
+            video_stream,
+            output_path,
+            vcodec="libx264",
+            acodec="aac",
+            preset="veryfast",
+            threads=2,
+            # loglevel="quiet",
         )
 
-        self.video_clip = VideoFileClip(combined_video_path)
+        logger.debug(f"FFMPEG CMD: {output.get_args()}")
+        output.run(overwrite_output=True, cmd=self.ffmpeg_cmd)
 
-        clips = [self.video_clip, subtitles_clip]
-
-        if self.config.watermark_path:
-            watermark_clip = self.__get_watermark_clip()
-            if watermark_clip:
-                logger.debug(f"added watermark: {self.config.watermark_path}")
-                clips.append(self.__get_watermark_clip())
-
-        result = CompositeVideoClip(clips=clips)
-
-        audio = AudioFileClip(tts_path)
-        result = result.with_audio(audio)
-
-        output_path = (Path(self.cwd) / "master__video.mp4").as_posix()
-        result.write_videofile(output_path, threads=self.config.threads)
-
+        logger.info("Video generation complete.")
         return output_path
 
-    def close_clip(self, clip: VideoFileClip):
-        try:
-            clip.close()
-        except Exception as e:
-            logger.exception(f"Error in close_clip(): {e}")
+    # def get_background_audio(self, video_clip: VideoClip, song_path: str) -> AudioClip:
+    #     """Takes the original audio and adds the background audio"""
+    #     logger.info(f"Getting background music: {song_path}")
 
-    async def add_background_music(self, video_clip: VideoFileClip, song_path: str):
-        logger.info(f"Adding background music: {song_path}")
+    #     def adjust_audio_to_target_dBFS(audio_file_path: str, target_dBFS=-30.0):
+    #         audio = AudioSegment.from_file(audio_file_path)
+    #         change_in_dBFS = target_dBFS - audio.dBFS
+    #         adjusted_audio = audio.apply_gain(change_in_dBFS)
+    #         adjusted_audio.export(audio_file_path, format="mp3")
+    #         logger.info(f"Adjusted audio to target dBFS: {target_dBFS}")
+    #         return audio_file_path
 
-        original_duration = video_clip.duration
-        original_audio = video_clip.audio
-        song_clip = AudioFileClip(song_path).with_fps(44100)
+    #     # set the volume of the song to 10% of the original volume
+    #     song_path = adjust_audio_to_target_dBFS(song_path)
 
-        # set the volume of the song to 10% of the original volume
-        song_clip = song_clip.subclip().multiply_volume(0.2)
+    #     background_audio = AudioFileClip(song_path)
 
-        # add the song to the video
-        comp_audio = CompositeAudioClip([original_audio, song_clip])
-        video_clip = video_clip.with_audio(comp_audio)
-        video_clip = video_clip.with_fps(30)
-        video_clip = video_clip.with_duration(original_duration)
-        return video_clip
+    #     if background_audio.duration < video_clip.duration:
+    #         # calculate how many times the background audio needs to repeat
+    #         repeats_needed = int(video_clip.duration // background_audio.duration) + 1
 
-    async def add_fade_out(self, video_clip: VideoFileClip) -> VideoFileClip:
-        """Adds a fade out to the end of the video but let the audio continue playing."""
-        return fx.fadeout(video_clip, 3)
+    #         # create a list of the background audio repeated
+    #         background_audio_repeated = concatenate_audioclips(
+    #             [background_audio] * repeats_needed
+    #         )
 
-    def __get_watermark_clip(self):
-        if not self.config.watermark_path:
-            logger.warning("Skipping watermark because its not provided")
-            return None
+    #         # trim the repeated audio to match the video duration
+    #         background_audio_repeated = background_audio_repeated.subclip(
+    #             0, video_clip.duration
+    #         )
+    #     else:
+    #         background_audio_repeated = background_audio.subclip(0, video_clip.duration)
 
-        assert self.video_clip is not None, "Video is not loaded"
+    #     comp_audio = CompositeAudioClip([video_clip.audio, background_audio_repeated])
 
-        watermark = ImageClip(self.config.watermark_path)
-        watermark = watermark.with_duration(self.video_clip.duration)
-        watermark = watermark.with_position(("right", "bottom"))
-        watermark = watermark.margin(right=8, top=8, bottom=8, opacity=0)
-        watermark = watermark.resize(height=50)
+    #     return comp_audio
 
-        return watermark
+    def crop(self, clip: FileClip) -> FFMPEG_TYPE:
+        width, height = get_video_size(clip.filepath)
+        aspect_ratio = width / height
+        ffmpeg_clip = clip.ffmpeg_clip
+
+        if aspect_ratio < 0.5625:
+            crop_height = int(width / 0.5625)
+            return ffmpeg_clip.filter(
+                "crop", w=width, h=crop_height, x=0, y=(height - crop_height) // 2
+            )
+        else:
+            crop_width = int(0.5625 * height)
+            return ffmpeg_clip.filter(
+                "crop", w=crop_width, h=height, x=(width - crop_width) // 2, y=0
+            )
+
+    def apply_watermark(self, video_stream):
+        """Adds a watermark to the bottom-right of the video."""
+
+        sysfont = os.path.join(os.getcwd(), "narrator/sys/fonts/luckiestguy.ttf")
+
+        # Check if watermark path/text is set and watermark type is valid
+        if (
+            not self.config.watermark_path_or_text
+            or self.config.watermark_type == "none"
+        ):
+            return video_stream  # No watermark, return original stream
+
+        # Text-based watermark
+        if self.config.watermark_type == "text":
+            watermark_text = self.config.watermark_path_or_text
+            video_stream = video_stream.filter(
+                "drawtext",
+                text=watermark_text,
+                x="if(lt(mod(t,20),10), (main_w-text_w)-16, if(lt(mod(t,20),10), 16, if(lt(mod(t,20),15), 16, (main_w-text_w)-16)))",
+                y="if(lt(mod(t,20),10), (main_h-text_h)-100, if(lt(mod(t,20),10), 50, if(lt(mod(t,20),15), (main_h-text_h)-100, 50)))",
+                fontsize=40,
+                fontcolor="white",
+                fontfile=sysfont,
+            )
+            logger.warning(f"Using text watermark with font: {sysfont}")
+
+        # Image-based watermark
+        elif self.config.watermark_type == "image":
+            watermark_path = self.config.watermark_path_or_text
+            watermark = ffmpeg.input(watermark_path)
+
+            # Resize watermark to a height of 100 while maintaining aspect ratio
+            watermark = watermark.filter("scale", -1, 100)
+
+            # Overlay the watermark in the bottom-right corner with 8px padding
+            video_stream = ffmpeg.overlay(
+                video_stream,
+                watermark,
+                x="(main_w-overlay_w)-8",
+                y="(main_h-overlay_h)-8",
+            )
+
+        logger.debug("Added watermark to video.")
+        return video_stream
+
+    async def create_gif(
+        self, master_video_path: str, start_time: float = 1.0, end_time: float = 1.5
+    ) -> str:
+        logger.debug("Creating GIF...")
+        gif_path = f"{self.cwd}/{self.job_id}.gif"
+
+        (
+            ffmpeg.input(master_video_path, ss=start_time, t=end_time - start_time)
+            .filter("fps", fps=6)
+            .filter("scale", "iw/2", "ih/2")
+            .output(gif_path, format="gif", loop=0, pix_fmt="rgb24")
+            .run(overwrite_output=True)
+        )
+
+        return gif_path

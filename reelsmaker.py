@@ -124,10 +124,9 @@ async def main():
 
         # create config
         config = ReelsMakerConfig(
+            job_id="".join(str(uuid4()).split("-")),
             background_audio_url=background_audio_url,
-            cwd=cwd,
             prompt=prompt,
-            sentence=sentence,
             video_gen_config=VideoGeneratorConfig(
                 bg_color=str(bg_color),
                 fontsize=int(fontsize),
@@ -153,7 +152,7 @@ async def main():
 
         # read uploaded file and save in a path
         if uploaded_audio:
-            config.background_music_path = await download_to_path(
+            config.video_gen_config.background_music_path = await download_to_path(
                 dest=os.path.join(config.cwd, "background.mp3"), buff=uploaded_audio
             )
 
@@ -171,10 +170,10 @@ async def main():
                 queue[queue_id] = config
 
                 reels_maker = ReelsMaker(config)
-                video_path = await reels_maker.start()
+                output = await reels_maker.start()
                 st.balloons()
-                st.video(video_path, autoplay=True)
-                st.download_button("Download Reels", video_path, file_name="reels.mp4")
+                st.video(output.video_file_path, autoplay=True)
+                st.download_button("Download Reels", output.video_file_path, file_name="reels.mp4")
             except Exception as e:
                 del queue[queue_id]
                 logger.exception(f"removed from queue: {queue_id}: -> {e}")

@@ -33,8 +33,6 @@ RUN apt-get install -y --no-install-recommends ffmpeg
 
 COPY . .
 
-#RUN pip install "git+https://github.com/Zulko/moviepy.git"
-
 EXPOSE 8501
 
 HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
